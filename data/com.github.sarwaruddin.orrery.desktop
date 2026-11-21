@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Orrery
+GenericName=Solar System Clock
+Comment=Live solar system, Moon phase and tonight's sky over your city
+Exec=orrery
+Icon=weather-clear-night
+Terminal=false
+Categories=Education;Astronomy;Qt;KDE;
+Keywords=planets;moon;sky;astronomy;sunrise;sunset;
+StartupWMClass=orrery
