@@ -8,7 +8,9 @@ cat > ~/.local/bin/orrery <<SH
 cd "$REPO" && exec python3 -m orrery "\$@"
 SH
 chmod +x ~/.local/bin/orrery
-install -m644 "$REPO/data/com.github.sarwaruddin.orrery.desktop" ~/.local/share/applications/
+# absolute Exec: ~/.local/bin isn't on the Plasma session's PATH, only the shell's
+sed "s|^Exec=orrery|Exec=$HOME/.local/bin/orrery|" "$REPO/data/com.github.sarwaruddin.orrery.desktop" \
+  > ~/.local/share/applications/com.github.sarwaruddin.orrery.desktop
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
 kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
-echo "installed: ~/.local/bin/orrery + menu entry (Education/Science)"
+echo "installed: ~/.local/bin/orrery + menu entry (Education > Astronomy)"
