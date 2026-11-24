@@ -42,8 +42,12 @@ Item {
     onWidthChanged: { stars.requestPaint(); orbitLayer.requestPaint(); bodyLayer.requestPaint() }
     onHeightChanged: { stars.requestPaint(); orbitLayer.requestPaint(); bodyLayer.requestPaint() }
 
+    // hidden behind the 3D view: don't paint at all, catch up when shown
+    onVisibleChanged: if (visible) { stars.requestPaint(); orbitLayer.requestPaint(); bodyLayer.requestPaint() }
+
     Connections {
         target: root.sky
+        enabled: root.visible
         function onBodiesChanged() { bodyLayer.requestPaint() }
         function onOrbitsChanged() { orbitLayer.requestPaint() }
         function onSelectionChanged() { bodyLayer.requestPaint() }

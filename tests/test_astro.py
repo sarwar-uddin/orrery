@@ -1,6 +1,7 @@
 """Checks against JPL DE421 (computed once with skyfield; values pinned here so
 the tests need nothing but the standard library)."""
 
+import math
 import unittest
 from datetime import datetime, timezone
 
@@ -74,6 +75,110 @@ class Positions(unittest.TestCase):
         self.assertEqual(astro.phase_name(45), "Waxing Crescent")
         self.assertEqual(astro.phase_name(181), "Full Moon")
         self.assertEqual(astro.phase_name(300), "Waning Crescent")
+
+
+def _unit(v):
+    n = math.sqrt(sum(c * c for c in v))
+    return tuple(c / n for c in v)
+
+
+def _dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _angle(a, b):
+    return math.degrees(math.acos(max(-1.0, min(1.0, _dot(_unit(a), _unit(b))))))
+
+
+class Orientation(unittest.TestCase):
+    """The IAU rotation models, checked against things that are independently known."""
+
+    def test_earth_obliquity(self):
+        pole, _ = astro.body_axes("Earth", jd(2026, 11, 22))
+        self.assertAlmostEqual(_angle(pole, (0, 0, 1)), 23.44, delta=0.02)
+
+    def test_axes_orthonormal(self):
+        for name in astro.IAU_ROTATION:
+            pole, pm = astro.body_axes(name, jd(2031, 5, 17, 6))
+            self.assertAlmostEqual(_dot(pole, pole), 1, places=9)
+            self.assertAlmostEqual(_dot(pm, pm), 1, places=9)
+            self.assertAlmostEqual(_dot(pole, pm), 0, places=9)
+
+    def test_obliquities_to_orbit(self):
+        # axial tilt relative to each planet's own orbit (NASA fact sheets)
+        # (right-hand rule, so Venus and Uranus come out past 90)
+        tilt = {"Mercury": 0.03, "Venus": 177.4, "Earth": 23.44, "Mars": 25.19,
+                "Jupiter": 3.13, "Saturn": 26.73, "Uranus": 97.77, "Neptune": 28.32}
+        j = jd(2026, 11, 22)
+        for name, ref in tilt.items():
+            pole, _ = astro.body_axes(name, j)
+            spin = tuple(-c for c in pole) if name in astro.RETROGRADE else pole
+            got = _angle(spin, astro.orbit_normal(name, j))
+            self.assertAlmostEqual(got, ref, delta=0.35, msg=name)
+
+    def test_dhaka_faces_the_sun_at_noon(self):
+        # at the Sun's transit, Dhaka's meridian should point at the Sun
+        lat, lon = DHAKA
+        j0 = jd(2026, 11, 22)
+        noon, _ = astro.transit("Sun", j0, j0 + 1, lat, lon)
+        pole, pm = astro.body_axes("Earth", noon)
+        east = _cross(pole, pm)
+        c, s = math.cos(math.radians(lon)), math.sin(math.radians(lon))
+        meridian = tuple(c * p + s * e for p, e in zip(pm, east))
+        sun = tuple(-v for v in astro.heliocentric("Earth", noon))
+        sun_eq = tuple(v - _dot(sun, pole) * p for v, p in zip(sun, pole))
+        self.assertLess(_angle(meridian, sun_eq), 0.5)
+
+    def test_daily_rotation_is_sidereal(self):
+        j = jd(2026, 11, 22)
+        _, a = astro.body_axes("Earth", j)
+        _, b = astro.body_axes("Earth", j + 0.99726957)  # one sidereal day
+        self.assertLess(_angle(a, b), 0.01)
+
+    def saturnicentric_latitude(self, j, of="Earth"):
+        pole, _ = astro.body_axes("Saturn", j)
+        sat = astro.heliocentric("Saturn", j)
+        obs = astro.heliocentric("Earth", j) if of == "Earth" else (0, 0, 0)
+        return 90 - _angle(pole, tuple(o - s for o, s in zip(obs, sat)))
+
+    def test_saturn_ring_plane_crossings_2025(self):
+        # Earth crossed Saturn's ring plane on 2025-03-23, the Sun on 2025-05-06
+        self.assertGreater(self.saturnicentric_latitude(jd(2025, 3, 13)), 0)
+        self.assertLess(self.saturnicentric_latitude(jd(2025, 4, 2)), 0)
+        self.assertLess(abs(self.saturnicentric_latitude(jd(2025, 3, 23))), 0.3)
+        self.assertGreater(self.saturnicentric_latitude(jd(2025, 4, 26), "Sun"), 0)
+        self.assertLess(self.saturnicentric_latitude(jd(2025, 5, 16), "Sun"), 0)
+
+    def test_saturn_rings_wide_open_2017(self):
+        # maximum opening of the northern face, October 2017 (B = +26.9 deg)
+        self.assertAlmostEqual(self.saturnicentric_latitude(jd(2017, 10, 16)), 26.9, delta=0.4)
+
+
+class Orbits3D(unittest.TestCase):
+    def test_planet_sits_on_its_orbit(self):
+        j = jd(2026, 11, 22)
+        for name in astro.PLANET_ORDER:
+            pos = astro.heliocentric(name, j)
+            path = astro.orbit_path_3d(name, j, 3600)
+            gap = min(math.dist(pos, p) for p in path)
+            self.assertLess(gap / math.hypot(*pos), 2e-3, name)
+
+    def test_inclinations(self):
+        j = jd(2000, 1, 1, 12)
+        for name in astro.PLANET_ORDER:
+            ref = astro.PLANETS[name].el[2]
+            self.assertAlmostEqual(_angle(astro.orbit_normal(name, j), (0, 0, 1)), abs(ref), 4, name)
+
+    def test_moon_vector(self):
+        j = jd(2026, 11, 22)
+        m = astro.moon_apparent(j)
+        x, y, z = astro.moon_geocentric(j)
+        self.assertAlmostEqual(math.hypot(x, y, z), m.dist_au, places=12)
+        self.assertAlmostEqual(math.degrees(math.atan2(y, x)) % 360, m.lon_j2000, places=6)
 
 
 if __name__ == "__main__":

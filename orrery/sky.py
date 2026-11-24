@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
+from PySide6.QtCore import Property, QObject, QProcess, QProcessEnvironment, QTimer, Signal, Slot
 
 from . import astro
+from .almanac import COLORS, compute_almanac
 
 CONFIG = Path.home() / ".config" / "orrery" / "config.json"
 DEFAULT_PLACE = {"name": "Dhaka", "lat": 23.8103, "lon": 90.4125, "tz": "Asia/Dhaka"}
@@ -28,15 +30,8 @@ SPEEDS = [
 PAUSED = 6
 REALTIME = 7
 
-COLORS = {
-    "Sun": "#ffd27a", "Moon": "#d8d8d0", "Mercury": "#a39e98", "Venus": "#e9d3a4",
-    "Earth": "#3f86d9", "Mars": "#c8502a", "Jupiter": "#d9b48c", "Saturn": "#e2cc8f",
-    "Uranus": "#9fd8de", "Neptune": "#4f74dd",
-}
 SIZES = {"Mercury": 4, "Venus": 6.5, "Earth": 7, "Mars": 5, "Jupiter": 12,
          "Saturn": 10, "Uranus": 8, "Neptune": 8}
-SKY_BODIES = ["Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"]
-NAKED_EYE_LIMIT = 5.0  # Dhaka skies; Uranus (5.6) is a binocular target here
 
 
 def load_place() -> dict:
@@ -48,116 +43,13 @@ def load_place() -> dict:
         return dict(DEFAULT_PLACE)
 
 
-def _fmt_dur(hours: float) -> str:
-    h = int(hours)
-    return f"{h}h {round((hours - h) * 60):02d}m"
-
-
-def compute_almanac(t: datetime, place: dict, tz: ZoneInfo):
-    """(sun, moon, tonight) for the local day containing t. Pure; runs off-thread."""
-    lat, lon = place["lat"], place["lon"]
-    jd = astro.julian_date(t)
-    local = t.astimezone(tz)
-
-    def loc(jd_):
-        return astro.datetime_from_jd(jd_).astimezone(tz)
-
-    def hm(jd_):
-        return loc(jd_).strftime("%H:%M")
-
-    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    day0 = astro.julian_date(midnight)
-    day1 = astro.julian_date(midnight + timedelta(days=1))
-
-    # --- sun
-    ev = dict((k, v) for k, v in astro.crossings("Sun", day0, day1, lat, lon))
-    sun_alt, sun_az = astro.altaz("Sun", jd, lat, lon)
-    noon_jd, noon_alt = astro.transit("Sun", day0, day1, lat, lon)
-    sun = astro.sun_apparent(jd)
-    sun_info = {
-        "rise": hm(ev["rise"]) if "rise" in ev else "—",
-        "set": hm(ev["set"]) if "set" in ev else "—",
-        "noon": f"{hm(noon_jd)} · {noon_alt:.0f}° high",
-        "length": _fmt_dur((ev["set"] - ev["rise"]) * 24) if len(ev) == 2 else "—",
-        "now": (f"{sun_alt:+.0f}° · {astro.compass(sun_az)}" if sun_alt > -0.8
-                else _twilight(sun_alt)),
-        "constellation": astro.constellation(sun.lon_j2000),
-    }
-
-    # --- moon
-    ph = astro.moon_phase(jd)
-    m = astro.moon_apparent(jd)
-    mev = astro.crossings("Moon", day0, day1, lat, lon)
-    nxt = astro.next_phases(jd, 31)
-    upcoming = []
-    for name in ("Full Moon", "New Moon"):
-        hit = next((t for n, t in nxt if n == name), None)
-        if hit:
-            upcoming.append([name.split()[0], loc(hit).strftime("%a %d %b, %H:%M")])
-    moon_alt, moon_az = astro.altaz("Moon", jd, lat, lon)
-    moon_info = {
-        "name": ph["name"],
-        "illumination": ph["illumination"],
-        "waxing": ph["waxing"],
-        "age": f"{ph['age_days']:.1f} days",
-        "distance": f"{ph['dist_km']:,.0f} km",
-        "constellation": astro.constellation(m.lon_j2000),
-        "rise": next((hm(t) for k, t in mev if k == "rise"), "—"),
-        "set": next((hm(t) for k, t in mev if k == "set"), "—"),
-        "now": f"{moon_alt:+.0f}° · {astro.compass(moon_az)}",
-        "upcoming": upcoming,
-    }
-
-    # --- tonight: from the sunset nearest this local afternoon to next morning
-    base = local if local.hour >= 12 else local - timedelta(days=1)
-    noon = base.replace(hour=12, minute=0, second=0, microsecond=0)
-    n0 = astro.julian_date(noon)
-    n1 = n0 + 1.0
-    steps = 144
-    times = [n0 + k / steps for k in range(steps + 1)]
-    dark = [astro.altaz("Sun", t, lat, lon)[0] < -6 for t in times]
-    rows = []
-    for name in SKY_BODIES:
-        alts = [astro.altaz(name, t, lat, lon) for t in times]
-        mag = (-12.0 if name == "Moon" else astro.planet_magnitude(name, jd))
-        good = [i for i in range(len(times)) if dark[i] and alts[i][0] > 8]
-        row = {"name": name, "color": COLORS[name],
-               "mag": "" if name == "Moon" else f"{mag:+.1f}"}
-        now_alt = astro.altaz(name, jd, lat, lon)[0]
-        row["up"] = now_alt > 0
-        if not good:
-            elong = astro.elongation(name, jd)
-            row["visible"] = False
-            row["text"] = ("lost in the Sun's glare" if elong < 18
-                           else "below the horizon all night")
-        else:
-            best = max(good, key=lambda i: alts[i][0])
-            row["visible"] = mag < NAKED_EYE_LIMIT
-            when = f"{hm(times[good[0]])}–{hm(times[good[-1]])}"
-            row["text"] = (f"{when} · best {hm(times[best])}, "
-                           f"{alts[best][0]:.0f}° {astro.compass(alts[best][1])}")
-            if not row["visible"]:
-                row["text"] += " · binoculars"
-        rows.append(row)
-    rows.sort(key=lambda r: (not r["visible"], not r["up"]))
-    return sun_info, moon_info, rows
-
-def _twilight(alt):
-    if alt > -6:
-        return f"civil twilight ({alt:.0f}°)"
-    if alt > -12:
-        return f"nautical twilight ({alt:.0f}°)"
-    if alt > -18:
-        return f"astronomical twilight ({alt:.0f}°)"
-    return f"night ({alt:.0f}°)"
-
-
 class Sky(QObject):
     clockChanged = Signal()
     bodiesChanged = Signal()
     almanacChanged = Signal()
     selectionChanged = Signal()
     orbitsChanged = Signal()
+    sceneChanged = Signal()       # anything the 3D view draws
     _almanacReady = Signal(object)
 
     def __init__(self):
@@ -182,6 +74,8 @@ class Sky(QObject):
         self._tick.start()
         self._worker_busy = False
         self._worker_dirty = False
+        self._proc = None          # the almanac worker (QProcess); False = unavailable
+        self._proc_buf = b""
         self._almanacReady.connect(self._apply_almanac)
         self._recompute(force_almanac=True)
 
@@ -223,6 +117,7 @@ class Sky(QObject):
         self._compute_selection(jd)
         self.clockChanged.emit()
         self.bodiesChanged.emit()
+        self.sceneChanged.emit()
 
         local = self._t.astimezone(self._tz)
         key = (local.date(), local.hour, local.minute // 10)
@@ -233,18 +128,70 @@ class Sky(QObject):
             self._almanac_key = key
             self._request_almanac()
 
-    # The almanac (rise/set searches, tonight's sky) takes ~70 ms of pure Python,
-    # so it runs on a worker thread; while it is busy, newer requests coalesce.
+    # The almanac (rise/set searches, tonight's sky) is ~100 ms of pure Python.
+    # It runs in a worker *process* (orrery/almanac_worker.py, over a pipe): on
+    # a thread it would hold the GIL and starve the GUI thread, which is what
+    # feeds frames to the 3D view. While a job is out, newer requests coalesce
+    # into one; during playback they are also spaced out, since nobody can read
+    # rise/set times changing 30 times a second.
+    ALMANAC_PLAYBACK_GAP_MS = 300
+
     def _request_almanac(self):
         if self._worker_busy:
             self._worker_dirty = True
             return
         self._worker_busy = True
-        t, place, tz = self._t, dict(self._place), self._tz
-        threading.Thread(target=self._almanac_job, args=(t, place, tz), daemon=True).start()
+        self._pending = (self._t, dict(self._place), self._tz)
+        proc = self._worker()
+        if proc:
+            req = {"t": self._t.timestamp(), "place": self._place}
+            proc.write((json.dumps(req) + "\n").encode())
+        else:  # no subprocesses here: a thread will do, GIL and all
+            threading.Thread(target=self._almanac_thread, args=self._pending, daemon=True).start()
 
-    def _almanac_job(self, t, place, tz):
-        result = compute_almanac(t, place, tz)
+    def _worker(self):
+        if self._proc is None:
+            proc = QProcess(self)
+            env = QProcessEnvironment.systemEnvironment()
+            root = str(Path(__file__).resolve().parent.parent)
+            old = env.value("PYTHONPATH")
+            env.insert("PYTHONPATH", root + (":" + old if old else ""))
+            proc.setProcessEnvironment(env)
+            proc.setProcessChannelMode(QProcess.ProcessChannelMode.ForwardedErrorChannel)
+            proc.readyReadStandardOutput.connect(self._worker_output)
+            proc.errorOccurred.connect(self._worker_failed)
+            proc.start(sys.executable, ["-m", "orrery.almanac_worker"])
+            self._proc = proc
+        return self._proc
+
+    def _worker_output(self):
+        if not self._proc:
+            return  # shutting down
+        self._proc_buf += bytes(self._proc.readAllStandardOutput())
+        while b"\n" in self._proc_buf:
+            line, self._proc_buf = self._proc_buf.split(b"\n", 1)
+            try:
+                reply = json.loads(line)
+                if isinstance(reply, dict):
+                    raise ValueError(reply.get("error"))
+                result = tuple(reply)
+            except ValueError:
+                result = compute_almanac(*self._pending)
+            self._apply_almanac(result)
+
+    def _worker_failed(self, _err):
+        # couldn't start, or crashed: go in-process from now on, and don't
+        # leave the request that was in flight hanging
+        if self._proc is False:
+            return
+        self._proc = False
+        if self._worker_busy:
+            threading.Thread(target=self._almanac_thread, args=self._pending, daemon=True).start()
+
+    def _almanac_thread(self, *args):
+        self._emit_almanac(compute_almanac(*args))
+
+    def _emit_almanac(self, result):
         try:
             self._almanacReady.emit(result)  # queued over to the GUI thread
         except RuntimeError:
@@ -253,11 +200,34 @@ class Sky(QObject):
     def _apply_almanac(self, result):
         self._sun, self._moon, self._tonight = result
         self.almanacChanged.emit()
-        if self._worker_busy:
+        if not self._worker_busy:
+            return
+        if not self._worker_dirty:
             self._worker_busy = False
-            if self._worker_dirty:
-                self._worker_dirty = False
-                self._request_almanac()
+        elif self.playing:
+            # stay "busy" through a cooldown, then catch up with wherever the clock is
+            QTimer.singleShot(self.ALMANAC_PLAYBACK_GAP_MS, self._after_cooldown)
+        else:
+            self._worker_busy = self._worker_dirty = False
+            self._request_almanac()
+
+    def _after_cooldown(self):
+        if not self._tick.isActive():
+            return  # shut down meanwhile
+        self._worker_busy = self._worker_dirty = False
+        self._request_almanac()
+
+    def shutdown(self):
+        """Stop the clock and the worker process (call before the app exits)."""
+        self._tick.stop()
+        proc, self._proc = self._proc, False
+        if proc:
+            proc.errorOccurred.disconnect(self._worker_failed)
+            proc.readyReadStandardOutput.disconnect(self._worker_output)
+            proc.closeWriteChannel()          # EOF: the worker's loop ends
+            if not proc.waitForFinished(1000):
+                proc.kill()
+                proc.waitForFinished(500)
 
     # ------------------------------------------------------- positions
     def _compute_bodies(self, jd):
@@ -281,8 +251,9 @@ class Sky(QObject):
     def _compute_selection(self, jd):
         name = self._selected
         if not name:
-            self._sel_info = {}
-            self.selectionChanged.emit()
+            if self._sel_info:          # only on the way out: an unchanged {} would
+                self._sel_info = {}     # still rebuild the sidebar card every tick
+                self.selectionChanged.emit()
             return
         lat, lon = self._place["lat"], self._place["lon"]
         info = {"name": name, "color": COLORS[name]}
@@ -314,8 +285,9 @@ class Sky(QObject):
                       ["RA / Dec", f"{int(ra_h)}h {int(ra_h % 1 * 60):02d}m / {a.dec:+.1f}°"],
                       ["Alt / Az", f"{alt:+.0f}° · {astro.compass(az)} ({az:.0f}°)"],
                       ["Orbit", per_txt]])
-        self._sel_info = info
-        self.selectionChanged.emit()
+        if info != self._sel_info:
+            self._sel_info = info
+            self.selectionChanged.emit()
 
     # ---------------------------------------------------- QML interface
     @Property(str, notify=clockChanged)
@@ -386,10 +358,44 @@ class Sky(QObject):
     def selectedInfo(self):
         return self._sel_info
 
+    # --- the 3D view: plain JSON, handed to the page with runJavaScript.
+    # Computed only when read, so the 2D map pays nothing for it.
+    @Property(str, notify=sceneChanged)
+    def scene3d(self):
+        jd = astro.julian_date(self._t)
+        bodies = []
+        for b in self._bodies:
+            pole, pm = astro.body_axes(b["name"], jd)
+            bodies.append({"name": b["name"], "pos": astro.heliocentric(b["name"], jd),
+                           "pole": pole, "pm": pm, "up": b.get("alt", -1) > 0})
+        sun_pole, sun_pm = astro.body_axes("Sun", jd)
+        return json.dumps({
+            "jd": jd, "days": jd - astro.J2000,
+            "speed": 1 if self._live else SPEEDS[self._speed][0],
+            "live": self._live,
+            "selected": self._selected,
+            "place": {"name": self._place["name"], "lat": self._place["lat"], "lon": self._place["lon"]},
+            "bodies": bodies,
+            "sun": {"pole": sun_pole, "pm": sun_pm},
+            "moon": astro.moon_geocentric(jd),
+        })
+
+    @Property(str, notify=orbitsChanged)
+    def orbits3d(self):
+        jd = self._orbit_jd if self._orbit_jd is not None else astro.julian_date(self._t)
+        return json.dumps([{"name": n, "points": [[round(c, 6) for c in p] for p in astro.orbit_path_3d(n, jd)]}
+                           for n in astro.PLANET_ORDER])
+
+    @Property(str, constant=True)
+    def static3d(self):
+        return json.dumps({"zodiac": [{"name": n, "lon": lon} for n, lon in astro.zodiac_labels()],
+                           "boundaries": astro.ZODIAC_BOUNDARIES})
+
     @Slot(str)
     def select(self, name):
         self._selected = "" if name == self._selected else name
         self._compute_selection(astro.julian_date(self._t))
+        self.sceneChanged.emit()
 
     @Slot()
     def goLive(self):
@@ -400,6 +406,10 @@ class Sky(QObject):
 
     @Slot()
     def togglePlay(self):
+        self._toggle_play()
+        self.sceneChanged.emit()    # the 3D view gates its globes' spin on the speed
+
+    def _toggle_play(self):
         if self._live:
             self._live = False
             self._speed = SPEEDS.index((86_400, "1 day/s"))
@@ -417,6 +427,7 @@ class Sky(QObject):
             self._speed = REALTIME
         self._speed = max(0, min(len(SPEEDS) - 1, self._speed + direction))
         self.clockChanged.emit()
+        self.sceneChanged.emit()
 
     @Slot(float)
     def step(self, seconds):

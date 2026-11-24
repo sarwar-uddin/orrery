@@ -1,0 +1,15 @@
+{
+  "name": "orrery-3d",
+  "private": true,
+  "description": "The three.js scene for Orrery's 3D view. Only needed to rebuild orrery/web/orrery3d.js.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.js --bundle --minify --format=iife --target=chrome110 --legal-comments=linked --outfile=../orrery/web/orrery3d.js",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "three": "^0.187.0"
+  }
+}

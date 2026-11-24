@@ -14,3 +14,5 @@ sed "s|^Exec=orrery|Exec=$HOME/.local/bin/orrery|" "$REPO/data/com.github.sarwar
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
 kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
 echo "installed: ~/.local/bin/orrery + menu entry (Education > Astronomy)"
+python3 -c "import PySide6.QtWebEngineQuick" 2>/dev/null \
+  || echo "note: no Qt WebEngine, so the 3D view is off (sudo pacman -S qt6-webengine to get it)"

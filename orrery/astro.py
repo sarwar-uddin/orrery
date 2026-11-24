@@ -169,6 +169,118 @@ def orbit_path(name: str, jd: float, n: int = 180) -> list[tuple[float, float]]:
     return pts
 
 
+def orbit_path_3d(name: str, jd: float, n: int = 360) -> list[tuple[float, float, float]]:
+    """The osculating ellipse at jd in full 3D (heliocentric ecliptic J2000, AU)."""
+    a, e, i, _l, peri, node = _elements(PLANETS[name], centuries(jd))
+    b = a * math.sqrt(1 - e * e)
+    return [_orbit_to_ecliptic(a * (math.cos(E) - e), b * math.sin(E), i, node, peri - node)
+            for E in (2 * math.pi * k / n for k in range(n + 1))]
+
+
+def orbit_normal(name: str, jd: float) -> tuple[float, float, float]:
+    """Unit vector along the orbit's angular momentum (ecliptic J2000)."""
+    _a, _e, i, _l, _peri, node = _elements(PLANETS[name], centuries(jd))
+    return (sind(i) * sind(node), -sind(i) * cosd(node), cosd(i))
+
+
+# ------------------------------------------------------- body orientation
+#
+# IAU WGCCRE 2015 (Archinal et al. 2018, Celest. Mech. Dyn. Astr. 130:22):
+# north pole (alpha0, delta0) in ICRF/J2000 equatorial coordinates, and the
+# prime meridian angle W measured along the body's equator from its ascending
+# node on the ICRF equator (which sits at right ascension alpha0 + 90 deg).
+# d = days and T = centuries from J2000; only the secular terms are kept
+# (the periodic ones are < 0.1 deg, except Neptune's, which is included).
+# Venus and Uranus turn backwards about their IAU north pole (W decreases).
+
+J2000 = 2451545.0
+OBLIQUITY_J2000 = 23.4392911
+
+
+def _iau_mercury(d, t):
+    return 281.0103 - 0.0328 * t, 61.4155 - 0.0049 * t, 329.5988 + 6.1385108 * d
+
+
+def _iau_venus(d, t):
+    return 272.76, 67.16, 160.20 - 1.4813688 * d
+
+
+def _iau_earth(d, t):
+    return -0.641 * t, 90.0 - 0.557 * t, 190.147 + 360.9856235 * d
+
+
+def _iau_mars(d, t):
+    # the 2009 secular model (Archinal et al. 2011); the 2015 one moves the
+    # precession into 1.6 deg periodic terms, which we would otherwise drop
+    return 317.68143 - 0.1061 * t, 52.88650 - 0.0609 * t, 176.630 + 350.89198226 * d
+
+
+def _iau_jupiter(d, t):  # System III (the magnetic field / radio rotation)
+    return 268.056595 - 0.006499 * t, 64.495303 + 0.002413 * t, 284.95 + 870.5360000 * d
+
+
+def _iau_saturn(d, t):
+    return 40.589 - 0.036 * t, 83.537 - 0.004 * t, 38.90 + 810.7939024 * d
+
+
+def _iau_uranus(d, t):
+    return 257.311, -15.175, 203.81 - 501.1600928 * d
+
+
+def _iau_neptune(d, t):
+    n = 357.85 + 52.316 * t
+    return (299.36 + 0.70 * sind(n), 43.46 - 0.51 * cosd(n),
+            249.978 + 541.1397757 * d - 0.48 * sind(n))
+
+
+def _iau_sun(d, t):
+    return 286.13, 63.87, 84.176 + 14.1844000 * d
+
+
+IAU_ROTATION = {
+    "Sun": _iau_sun, "Mercury": _iau_mercury, "Venus": _iau_venus, "Earth": _iau_earth,
+    "Mars": _iau_mars, "Jupiter": _iau_jupiter, "Saturn": _iau_saturn,
+    "Uranus": _iau_uranus, "Neptune": _iau_neptune,
+}
+
+
+RETROGRADE = {"Venus", "Uranus"}
+
+
+def equatorial_to_ecliptic_vec(v: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Rotate a J2000 equatorial vector into J2000 ecliptic coordinates."""
+    ce, se = cosd(OBLIQUITY_J2000), sind(OBLIQUITY_J2000)
+    x, y, z = v
+    return (x, ce * y + se * z, -se * y + ce * z)
+
+
+def body_axes(name: str, jd: float):
+    """(north pole, prime meridian) unit vectors of a body in ecliptic J2000.
+
+    The prime meridian vector points from the body's centre to longitude 0 on
+    its equator, so a surface point at planetocentric east longitude lon and
+    latitude lat is  cos(lat)(pm cos(lon) + (pole x pm) sin(lon)) + pole sin(lat).
+    """
+    d = jd - J2000
+    a0, d0, w = IAU_ROTATION[name](d, d / 36525.0)
+    pole = (cosd(d0) * cosd(a0), cosd(d0) * sind(a0), sind(d0))
+    node = (cosd(a0 + 90), sind(a0 + 90), 0.0)
+    pxn = (pole[1] * node[2] - pole[2] * node[1],
+           pole[2] * node[0] - pole[0] * node[2],
+           pole[0] * node[1] - pole[1] * node[0])
+    cw, sw = cosd(w), sind(w)
+    pm = tuple(cw * n + sw * q for n, q in zip(node, pxn))
+    return equatorial_to_ecliptic_vec(pole), equatorial_to_ecliptic_vec(pm)
+
+
+def moon_geocentric(jd: float) -> tuple[float, float, float]:
+    """Geocentric ecliptic J2000 position of the Moon, AU."""
+    m = moon_apparent(jd)
+    cl = cosd(m.lat)
+    return (m.dist_au * cl * cosd(m.lon_j2000), m.dist_au * cl * sind(m.lon_j2000),
+            m.dist_au * sind(m.lat))
+
+
 # ---------------------------------------------------------- coordinate glue
 
 def ecliptic_to_equatorial(lon: float, lat: float, eps: float) -> tuple[float, float]:
