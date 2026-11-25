@@ -138,3 +138,7 @@ The source is in `web/src/`: `main.js` (scene), `shaders.js` (GLSL),
 - [three.js](https://threejs.org) (MIT), bundled
 - Earth's coastlines: [Natural Earth](https://www.naturalearthdata.com) 1:50m land and lakes (public domain)
 - Simplex noise: Ian McEwan and Stefan Gustavson (MIT)
+
+## Licence
+
+GPL-3.0-or-later.
